@@ -146,6 +146,10 @@ def send_telegram(text):
 
 def main():
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+    if os.environ.get("ARGOS_PING") == "1":
+        send_telegram(f"✅ ARGOS CGV 봇 설정 확인 완료 ({now} KST)\n"
+                      "이제 신규 회차 오픈·취소표 발생 시 이 방으로 알림이 옵니다.")
+        print("설정 확인 핑 전송")
     curr, errors = fetch_showtimes()
     prev = load_state()
 
