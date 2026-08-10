@@ -4,8 +4,8 @@ ARGOS CGV IMAX 감시봇
 - 용산아이파크몰 / 영등포타임스퀘어 IMAX관의 '오디세이' 상영을 감시한다.
 - 대상: 평일(월~금) 18:00 이전 시작 회차
 - 알림 조건:
-  1) 신규 회차 오픈  : 새로운 회차가 예매 목록에 등장
-  2) 취소표 발생     : 직전 확인 대비 잔여석 수가 늘어남
+  신규 회차 오픈 : 새로운 회차가 예매 목록에 등장 (취소표 알림은 사용자 요청으로 제거)
+- 오픈 이력은 openings.log 에 기록해 두었다가 오픈 요일/시각 패턴 분석에 사용한다.
 - 알림 채널: 텔레그램 봇 (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 환경변수)
   환경변수가 없으면 전송 없이 로그만 출력한다(테스트 모드).
 """
@@ -22,7 +22,9 @@ KST = timezone(timedelta(hours=9))
 MOVIE_KEYWORD = "오디세이"
 SCREEN_KEYWORD = "IMAX"
 CUTOFF_TIME = "1800"          # 이 시각 '이전' 시작 회차만 (HHMM)
-DAYS_AHEAD = 14               # 오늘부터 며칠치 스케줄을 훑을지
+DAYS_AHEAD = 20               # 오늘부터 며칠치 스케줄을 훑을지
+                              # CGV 오픈 범위(~2주)보다 넉넉히 잡아야
+                              # '감시 범위에 새로 들어온 날'을 신규 오픈으로 오인하지 않는다
 WEEKDAYS_ONLY = True          # 평일(월~금)만
 
 SITES = {
@@ -34,6 +36,7 @@ API = "https://cgv.co.kr/api/v1/booking/searchMovScnInfo?coCd=A420&siteNo={site}
 BOOKING_URL = "https://cgv.co.kr/cnm/movieBook/cinema"
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
+OPENINGS_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openings.log")
 
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -110,18 +113,25 @@ def fmt_date(ymd, weekday):
 
 
 def build_alerts(prev, curr):
-    """이전 상태와 비교해 알림 문구 목록을 만든다."""
+    """이전 상태와 비교해 '신규 회차 오픈' 알림 문구 목록을 만든다."""
     alerts = []
     first_run = not prev
-    for key, info in sorted(curr.items()):
-        head = f"{info['site']} {info['screen']} · {fmt_date(info['ymd'], info['weekday'])} {info['start']}"
-        if key not in prev:
-            if not first_run:
-                alerts.append(f"🆕 신규 회차 오픈!\n{head}\n잔여 {info['free']}/{info['total']}석")
-        else:
-            before = prev[key].get("free", 0)
-            if info["free"] > before:
-                alerts.append(f"🎫 취소표 발생!\n{head}\n잔여 {before} → {info['free']}석")
+    now = datetime.now(KST)
+    new_keys = [k for k in sorted(curr) if k not in prev]
+    for key in new_keys:
+        info = curr[key]
+        # 오픈 이력 기록 (패턴 분석용): 감지시각 TAB 상영일 TAB 시작시각 TAB 극장 TAB 잔여/전체
+        with open(OPENINGS_LOG, "a", encoding="utf-8") as f:
+            f.write("\t".join([
+                now.strftime("%Y-%m-%d %H:%M"),
+                info["ymd"], info["start"], info["site"],
+                f"{info['free']}/{info['total']}",
+            ]) + "\n")
+        if not first_run:
+            show_day = datetime.strptime(info["ymd"], "%Y%m%d").date()
+            d_day = (show_day - now.date()).days
+            head = f"{info['site']} {info['screen']} · {fmt_date(info['ymd'], info['weekday'])} {info['start']}"
+            alerts.append(f"🆕 신규 회차 오픈! (상영 D-{d_day})\n{head}\n잔여 {info['free']}/{info['total']}석")
     return alerts
 
 

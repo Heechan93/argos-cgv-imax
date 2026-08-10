@@ -35,7 +35,7 @@ jobs:
 
       - name: 상태 저장
         run: |
-          git add state.json
+          git add -A
           if [[ -n "$(git status --porcelain)" ]]; then
             git config user.name "argos-bot"
             git config user.email "actions@github.com"
