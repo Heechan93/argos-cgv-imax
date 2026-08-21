@@ -54,6 +54,52 @@ async function fetchDay(siteNo, dateYmd) {
   }
 }
 
+const OPENINGS_LOG_URL =
+  "https://raw.githubusercontent.com/Heechan93/argos-cgv-imax/main/openings.log";
+
+function fmtYmd(y) {
+  const d = new Date(`${y.slice(0, 4)}-${y.slice(4, 6)}-${y.slice(6, 8)}T00:00:00Z`);
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()}(${WEEKDAY_KO[d.getUTCDay()]})`;
+}
+
+/** openings.log를 읽어 '언제 오픈됐는지' 이벤트 요약을 만든다. */
+async function buildOpeningPattern() {
+  try {
+    const res = await fetch(OPENINGS_LOG_URL);
+    if (!res.ok) return null;
+    const lines = (await res.text()).trim().split("\n").filter(Boolean);
+    if (!lines.length) return null;
+    const byDay = {}; // 감지 날짜별 묶음
+    for (const ln of lines) {
+      const [ts, showYmd] = ln.split("\t");
+      if (!ts || !showYmd) continue;
+      const [day, time] = ts.split(" ");
+      const e = (byDay[day] = byDay[day] || { times: [], shows: [] });
+      e.times.push(time);
+      e.shows.push(showYmd);
+    }
+    const days = Object.keys(byDay).sort();
+    const events = days.map((day) => {
+      const e = byDay[day];
+      e.times.sort();
+      e.shows.sort();
+      const d = new Date(day + "T00:00:00Z");
+      const label = `${d.getUTCMonth() + 1}/${d.getUTCDate()}(${WEEKDAY_KO[d.getUTCDay()]})`;
+      const tRange = e.times[0] === e.times[e.times.length - 1]
+        ? e.times[0]
+        : `${e.times[0]}~${e.times[e.times.length - 1]}`;
+      const sRange = e.shows[0] === e.shows[e.shows.length - 1]
+        ? fmtYmd(e.shows[0])
+        : `${fmtYmd(e.shows[0])}~${fmtYmd(e.shows[e.shows.length - 1])}`;
+      return `${label} ${tRange} → ${sRange} 회차`;
+    });
+    const hours = days.flatMap((d) => byDay[d].times.map((t) => parseInt(t.split(":")[0], 10)));
+    return { events, hourMin: Math.min(...hours), hourMax: Math.max(...hours) };
+  } catch (e) {
+    return null;
+  }
+}
+
 async function buildReport() {
   const now = kstNow();
   const jobs = [];
@@ -70,8 +116,10 @@ async function buildReport() {
   const results = await Promise.all(jobs);
 
   const bySite = {};
+  let maxOpen = null; // 현재 예매가 열려 있는 마지막 날짜
   for (const { siteNo, date, rows } of results) {
     if (!rows.length) continue;
+    if (!maxOpen || date > maxOpen) maxOpen = date;
     const dayLabel = `${date.getUTCMonth() + 1}/${date.getUTCDate()}(${WEEKDAY_KO[date.getUTCDay()]})`;
     const parts = rows
       .sort((a, b) => (a.scnsrtTm || "").localeCompare(b.scnsrtTm || ""))
@@ -96,6 +144,27 @@ async function buildReport() {
     }
   }
   if (!any) out += "\n(조회 실패였을 수도 있으니 잠시 후 다시 시도해보세요)";
+
+  // 오픈 예측 섹션
+  out += "\n📅 오픈 예측\n";
+  if (maxOpen) {
+    const label = `${maxOpen.getUTCMonth() + 1}/${maxOpen.getUTCDate()}(${WEEKDAY_KO[maxOpen.getUTCDay()]})`;
+    // maxOpen 다음 평일 = 다음 오픈 대상
+    const next = new Date(maxOpen.getTime());
+    do next.setUTCDate(next.getUTCDate() + 1);
+    while (next.getUTCDay() === 0 || next.getUTCDay() === 6);
+    const nextLabel = `${next.getUTCMonth() + 1}/${next.getUTCDate()}(${WEEKDAY_KO[next.getUTCDay()]})`;
+    out += `지금은 ${label}까지 열려 있어요. 다음 오픈 대상: ${nextLabel}~ 회차\n`;
+  }
+  const pat = await buildOpeningPattern();
+  if (pat && pat.events.length) {
+    out += `지금까지 관측된 오픈 시각:\n`;
+    for (const e of pat.events.slice(-4)) out += `· ${e}\n`;
+    out += `→ 지금까지는 ${pat.hourMin}시~${pat.hourMax + 1}시 사이(평일)에 열렸어요. ` +
+      "용산은 오픈 수 분 내 매진되니 이 시간대엔 미리 대기 추천!";
+  } else {
+    out += "(오픈 기록이 더 쌓이면 요일·시각 패턴을 여기에 보여드려요)";
+  }
   return out;
 }
 
