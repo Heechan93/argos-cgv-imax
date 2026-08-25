@@ -119,6 +119,9 @@ def save_state(state):
 
 
 def send_telegram(text):
+    if os.environ.get("ARGOS_DRY_RUN") == "1":
+        print("[리허설] 실제 전송 없이 문구만 출력:\n" + text)
+        return
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
@@ -182,6 +185,8 @@ def announce(hits, now):
         msg += "\n".join(f"   {r['start']}  {r['free']}/{r['total']}석" for r in hit["rows"]) + "\n"
     msg += f"\n지금 바로 예매하세요 👇\n{BOOKING_URL}"
     send_telegram(msg)
+    if os.environ.get("ARGOS_DRY_RUN") == "1":
+        return
 
     with open(OPENINGS_LOG, "a", encoding="utf-8") as f:
         for hit in hits:
@@ -194,7 +199,7 @@ def announce(hits, now):
 
 def main():
     state = load_state()
-    horizon = state.get("horizon")
+    horizon = os.environ.get("ARGOS_FORCE_HORIZON") or state.get("horizon")
     if not horizon:
         horizon = bootstrap()
         save_state({"horizon": horizon})
@@ -220,6 +225,9 @@ def main():
                 now = datetime.now(KST)
                 print(f"[{tick}] 신규 오픈 감지: {[h['ymd'] for h in hits]}")
                 announce(hits, now)
+                if os.environ.get("ARGOS_DRY_RUN") == "1":
+                    print("[리허설] 상태를 저장하지 않고 종료")
+                    return
                 horizon = h2
                 save_state({"horizon": horizon})
                 return  # 잡을 끝내고 다음 잡이 새 기준선으로 이어받는다
