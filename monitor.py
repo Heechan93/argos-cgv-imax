@@ -1,104 +1,114 @@
 # -*- coding: utf-8 -*-
 """
-ARGOS CGV IMAX 감시봇
-- 용산아이파크몰 / 영등포타임스퀘어 IMAX관의 '오디세이' 상영을 감시한다.
-- 대상: 평일(월~금) 18:00 이전 시작 회차
-- 알림 조건:
-  신규 회차 오픈 : 새로운 회차가 예매 목록에 등장 (취소표 알림은 사용자 요청으로 제거)
-- 오픈 이력은 openings.log 에 기록해 두었다가 오픈 요일/시각 패턴 분석에 사용한다.
-- 알림 채널: 텔레그램 봇 (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 환경변수)
-  환경변수가 없으면 전송 없이 로그만 출력한다(테스트 모드).
+ARGOS CGV 영등포 IMAX 1분 감시 (GitHub Actions 상주형)
+
+Cloudflare Cron Trigger가 계정 차원에서 dispatch되지 않는 장애가 있어
+(scheduled 핸들러 자체는 정상, HTTP로 호출하면 동작) 감시를 여기로 되돌렸다.
+GitHub 예약 실행은 최대 1시간까지 밀리므로 '예약을 자주 거는' 대신
+한 번 뜬 잡이 LOOP_MINUTES 동안 1분 간격으로 상주하며 감시한다.
+공개 저장소라 Actions 실행 시간은 무료·무제한이다.
+
+감시 대상 : 영등포타임스퀘어 IMAX 「오디세이」 평일 18:00 이전 회차
+알림 조건 : 아직 안 열린 날짜에 회차가 새로 등장 (= 신규 오픈)
 """
 
 import json
 import os
 import sys
-import urllib.request
+import time
 import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 KST = timezone(timedelta(hours=9))
 
+SITE_NO = "0059"
+SITE_NM = "영등포타임스퀘어"
 MOVIE_KEYWORD = "오디세이"
 SCREEN_KEYWORD = "IMAX"
-CUTOFF_TIME = "1800"          # 이 시각 '이전' 시작 회차만 (HHMM)
-DAYS_AHEAD = 20               # 오늘부터 며칠치 스케줄을 훑을지
-                              # CGV 오픈 범위(~2주)보다 넉넉히 잡아야
-                              # '감시 범위에 새로 들어온 날'을 신규 오픈으로 오인하지 않는다
-WEEKDAYS_ONLY = True          # 평일(월~금)만
+CUTOFF_TIME = "1800"
 
-SITES = {
-    "0013": "용산아이파크몰",
-    "0059": "영등포타임스퀘어",
-}
+LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "70"))
+PROBE_NARROW = 1   # 평소: 다음 평일 1일만
+PROBE_WIDE = 4     # 10분마다: 4일치
+PROBE_ONHIT = 6    # 오픈 감지 시: 6일치 전수
+BLOCK_COOLDOWN_S = 600
+BOOTSTRAP_DAYS = 20
 
-API = "https://cgv.co.kr/api/v1/booking/searchMovScnInfo?coCd=A420&siteNo={site}&scnYmd={ymd}&rtctlScopCd=08"
+BASE = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.path.join(BASE, "state.json")
+OPENINGS_LOG = os.path.join(BASE, "openings.log")
+
+API = ("https://cgv.co.kr/api/v1/booking/searchMovScnInfo"
+       "?coCd=A420&siteNo={site}&scnYmd={ymd}&rtctlScopCd=08")
 BOOKING_URL = "https://cgv.co.kr/cnm/movieBook/cinema"
-
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
-OPENINGS_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openings.log")
 
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "ko-KR,ko;q=0.9",
-    "Referer": "https://cgv.co.kr/cnm/movieBook/cinema",
+    "Referer": BOOKING_URL,
 }
 
 WEEKDAY_KO = ["월", "화", "수", "목", "금", "토", "일"]
 
 
-def http_get_json(url: str):
-    req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=30) as res:
-        return json.loads(res.read().decode("utf-8"))
+class Blocked(Exception):
+    """CGV 봇 차단 페이지(HTML)를 받았을 때."""
 
 
-def fetch_showtimes():
-    """감시 대상 회차 목록을 {key: info} 로 반환."""
-    today = datetime.now(KST).date()
-    found = {}
-    errors = []
-    for site_no, site_name in SITES.items():
-        for d in range(DAYS_AHEAD + 1):
-            day = today + timedelta(days=d)
-            if WEEKDAYS_ONLY and day.weekday() >= 5:
-                continue
-            ymd = day.strftime("%Y%m%d")
-            url = API.format(site=site_no, ymd=ymd)
-            try:
-                data = http_get_json(url)
-            except Exception as e:
-                errors.append(f"{site_name} {ymd}: {e}")
-                continue
-            for row in (data.get("data") or []):
-                mov = (row.get("movNm") or "") + (row.get("expoProdNm") or "")
-                screen = (row.get("scnsNm") or "") + (row.get("movkndDsplNm") or "")
-                start = row.get("scnsrtTm") or ""
-                if MOVIE_KEYWORD not in mov:
-                    continue
-                if SCREEN_KEYWORD.lower() not in screen.lower():
-                    continue
-                if not start or start >= CUTOFF_TIME:
-                    continue
-                key = "|".join([site_no, ymd, row.get("scnsNo") or "", row.get("scnSseq") or ""])
-                found[key] = {
-                    "site": site_name,
-                    "ymd": ymd,
-                    "weekday": WEEKDAY_KO[day.weekday()],
-                    "start": f"{start[:2]}:{start[2:]}",
-                    "screen": row.get("scnsNm") or "IMAX관",
-                    "free": int(row.get("frSeatCnt") or 0),
-                    "total": int(row.get("stcnt") or 0),
-                }
-    return found, errors
+def fetch_show(date_ymd):
+    """해당 날짜의 감시 대상 회차 목록. 차단이면 Blocked."""
+    req = urllib.request.Request(API.format(site=SITE_NO, ymd=date_ymd), headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=20) as res:
+        raw = res.read().decode("utf-8", "replace")
+    if raw.lstrip().startswith("<"):
+        raise Blocked()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise Blocked()
+    rows = []
+    for r in (data.get("data") or []):
+        mov = (r.get("movNm") or "") + (r.get("expoProdNm") or "")
+        scr = (r.get("scnsNm") or "") + (r.get("movkndDsplNm") or "")
+        start = r.get("scnsrtTm") or ""
+        if MOVIE_KEYWORD not in mov:
+            continue
+        if SCREEN_KEYWORD not in scr.upper():
+            continue
+        if not start or start >= CUTOFF_TIME:
+            continue
+        rows.append({
+            "start": f"{start[:2]}:{start[2:]}",
+            "free": int(r.get("frSeatCnt") or 0),
+            "total": int(r.get("stcnt") or 0),
+        })
+    rows.sort(key=lambda x: x["start"])
+    return rows
+
+
+def next_weekdays(base_ymd, n):
+    d = datetime.strptime(base_ymd, "%Y%m%d").date()
+    out = []
+    while len(out) < n:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            out.append(d.strftime("%Y%m%d"))
+    return out
+
+
+def fmt_date(y):
+    d = datetime.strptime(y, "%Y%m%d").date()
+    return f"{d.month}/{d.day}({WEEKDAY_KO[d.weekday()]})"
 
 
 def load_state():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
-            return json.load(f)
+            s = json.load(f)
+            return s if isinstance(s, dict) else {}
     except Exception:
         return {}
 
@@ -108,87 +118,117 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
 
 
-def fmt_date(ymd, weekday):
-    return f"{int(ymd[4:6])}/{int(ymd[6:8])}({weekday})"
-
-
-def build_alerts(prev, curr):
-    """이전 상태와 비교해 '신규 회차 오픈' 알림 문구 목록을 만든다."""
-    alerts = []
-    first_run = not prev
-    now = datetime.now(KST)
-    new_keys = [k for k in sorted(curr) if k not in prev]
-    for key in new_keys:
-        info = curr[key]
-        # 오픈 이력 기록 (패턴 분석용): 감지시각 TAB 상영일 TAB 시작시각 TAB 극장 TAB 잔여/전체
-        with open(OPENINGS_LOG, "a", encoding="utf-8") as f:
-            f.write("\t".join([
-                now.strftime("%Y-%m-%d %H:%M"),
-                info["ymd"], info["start"], info["site"],
-                f"{info['free']}/{info['total']}",
-            ]) + "\n")
-        if not first_run:
-            show_day = datetime.strptime(info["ymd"], "%Y%m%d").date()
-            d_day = (show_day - now.date()).days
-            head = f"{info['site']} {info['screen']} · {fmt_date(info['ymd'], info['weekday'])} {info['start']}"
-            alerts.append(f"🆕 신규 회차 오픈! (상영 D-{d_day})\n{head}\n잔여 {info['free']}/{info['total']}석")
-    return alerts
-
-
 def send_telegram(text):
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
-        print("[테스트 모드] 텔레그램 미설정 — 전송 생략:")
-        print(text)
+        print("[테스트 모드] 텔레그램 미설정 — 전송 생략:\n" + text)
         return
     payload = urllib.parse.urlencode({
-        "chat_id": chat_id,
-        "text": text,
-        "disable_web_page_preview": "true",
+        "chat_id": chat_id, "text": text, "disable_web_page_preview": "true",
     }).encode("utf-8")
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage", data=payload,
         headers={"Content-Type": "application/x-www-form-urlencoded"})
-    with urllib.request.urlopen(req, timeout=30) as res:
+    with urllib.request.urlopen(req, timeout=20) as res:
         res.read()
 
 
+def bootstrap():
+    """지금 어디까지 열려 있는지 확인해 기준선을 잡는다(알림 없음)."""
+    today = datetime.now(KST).date()
+    horizon = today.strftime("%Y%m%d")
+    for i in range(BOOTSTRAP_DAYS + 1):
+        d = today + timedelta(days=i)
+        if d.weekday() >= 5:
+            continue
+        y = d.strftime("%Y%m%d")
+        try:
+            if fetch_show(y) and y > horizon:
+                horizon = y
+        except Blocked:
+            break
+        except Exception:
+            continue
+        time.sleep(1)
+    return horizon
+
+
+def probe(horizon, count):
+    """아직 안 열린 다음 평일들을 확인. (hits, new_horizon, blocked)"""
+    hits, new_horizon = [], horizon
+    for y in next_weekdays(horizon, count):
+        try:
+            rows = fetch_show(y)
+        except Blocked:
+            return hits, new_horizon, True
+        except Exception:
+            continue
+        if rows:
+            hits.append({"ymd": y, "rows": rows})
+            if y > new_horizon:
+                new_horizon = y
+        time.sleep(1)
+    return hits, new_horizon, False
+
+
+def announce(hits, now):
+    today = now.date()
+    msg = (f"🚨 신규 회차 오픈 감지!\n{now.strftime('%Y-%m-%d %H:%M')} KST\n"
+           f"━━━━━━━━━━━━━━━\n[{SITE_NM} IMAX]\n")
+    for hit in hits:
+        show = datetime.strptime(hit["ymd"], "%Y%m%d").date()
+        msg += f"\n▸ {fmt_date(hit['ymd'])} (D-{(show - today).days})\n"
+        msg += "\n".join(f"   {r['start']}  {r['free']}/{r['total']}석" for r in hit["rows"]) + "\n"
+    msg += f"\n지금 바로 예매하세요 👇\n{BOOKING_URL}"
+    send_telegram(msg)
+
+    with open(OPENINGS_LOG, "a", encoding="utf-8") as f:
+        for hit in hits:
+            f.write("\t".join([
+                now.strftime("%Y-%m-%d %H:%M"), hit["ymd"],
+                hit["rows"][0]["start"], SITE_NM,
+                f"{hit['rows'][0]['free']}/{hit['rows'][0]['total']}",
+            ]) + "\n")
+
+
 def main():
-    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-    if os.environ.get("ARGOS_PING") == "1":
-        send_telegram(f"✅ ARGOS CGV 봇 설정 확인 완료 ({now} KST)\n"
-                      "이제 신규 회차 오픈·취소표 발생 시 이 방으로 알림이 옵니다.")
-        print("설정 확인 핑 전송")
-    curr, errors = fetch_showtimes()
-    prev = load_state()
+    state = load_state()
+    horizon = state.get("horizon")
+    if not horizon:
+        horizon = bootstrap()
+        save_state({"horizon": horizon})
+        print(f"기준선 설정: {horizon}까지 예매 열림")
 
-    print(f"[{now} KST] 감시 대상 회차 {len(curr)}건 확인")
-    for key, info in sorted(curr.items()):
-        print(f"  - {info['site']} {fmt_date(info['ymd'], info['weekday'])} "
-              f"{info['start']} {info['screen']} 잔여 {info['free']}/{info['total']}")
+    print(f"영등포 IMAX 1분 감시 시작 (기준선 {horizon}, {LOOP_MINUTES}분간)")
+    deadline = time.time() + LOOP_MINUTES * 60
+    blocked_until = 0
+    tick = 0
 
-    if errors:
-        print(f"조회 오류 {len(errors)}건:", file=sys.stderr)
-        for e in errors:
-            print("  " + e, file=sys.stderr)
+    while time.time() < deadline:
+        tick += 1
+        if time.time() >= blocked_until:
+            wide = tick % 10 == 0
+            hits, h2, blocked = probe(horizon, PROBE_WIDE if wide else PROBE_NARROW)
+            if blocked:
+                blocked_until = time.time() + BLOCK_COOLDOWN_S
+                print(f"[{tick}] CGV 차단 감지 — 10분 대기", file=sys.stderr)
+            elif hits:
+                full_hits, full_h, _ = probe(horizon, PROBE_ONHIT)
+                if len(full_hits) >= len(hits):
+                    hits, h2 = full_hits, full_h
+                now = datetime.now(KST)
+                print(f"[{tick}] 신규 오픈 감지: {[h['ymd'] for h in hits]}")
+                announce(hits, now)
+                horizon = h2
+                save_state({"horizon": horizon})
+                return  # 잡을 끝내고 다음 잡이 새 기준선으로 이어받는다
+            elif tick % 10 == 0:
+                print(f"[{tick}] 감시 중 (기준선 {horizon})", flush=True)
+        time.sleep(60)
 
-    # 스케줄 조회가 전부 실패하면 상태를 덮어쓰지 않고 종료(오탐 방지)
-    if not curr and errors:
-        print("전 회차 조회 실패 — 상태 유지 후 종료", file=sys.stderr)
-        sys.exit(1)
-
-    alerts = build_alerts(prev, curr)
-    if alerts:
-        header = "🤖 ARGOS · CGV IMAX 오디세이\n" + "─" * 22
-        footer = f"\n예매 바로가기: {BOOKING_URL}"
-        message = header + "\n" + "\n\n".join(alerts) + footer
-        send_telegram(message)
-        print(f"알림 {len(alerts)}건 전송 완료")
-    else:
-        print("변동 없음")
-
-    save_state(curr)
+    save_state({"horizon": horizon})
+    print(f"{LOOP_MINUTES}분 감시 종료 (기준선 {horizon})")
 
 
 if __name__ == "__main__":

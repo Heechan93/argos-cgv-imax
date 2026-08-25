@@ -1,44 +1,51 @@
-name: ARGOS CGV IMAX monitor
+name: ARGOS 영등포 IMAX 1분 감시
 
-# 감시는 Cloudflare Worker(1분 간격, 영등포)로 이관했다.
-# GitHub의 예약 실행은 5분 크론을 걸어도 실제로는 ~1시간까지 밀려서
-# 오픈 시각을 분 단위로 잡을 수 없었다. 여기서는 수동 실행만 남긴다.
+# GitHub의 예약 실행은 5분 크론을 걸어도 실제로는 최대 1시간까지 밀린다.
+# 그래서 '자주 실행'하는 대신, 한 번 뜬 잡이 70분간 상주하며 1분 간격으로 감시한다.
+# 매시 예약(실제로는 ~55분 간격) + 70분 상주 → 서로 겹쳐 빈틈이 생기지 않는다.
+# 공개 저장소라 Actions 실행 시간은 무료·무제한이다.
 on:
+  schedule:
+    - cron: "3 * * * *"
   workflow_dispatch:
     inputs:
-      ping:
-        description: "설정 확인 핑을 텔레그램으로 전송"
-        type: boolean
-        default: false
+      minutes:
+        description: "감시 지속 시간(분)"
+        type: string
+        default: "70"
 
 permissions:
   contents: write
 
+# 겹쳐 도는 것을 허용한다(빈틈 방지). 취소하지 않는다.
 concurrency:
-  group: cgv-imax-monitor
+  group: cgv-watch-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
-  check:
+  watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
 
-      - name: CGV 좌석 확인
+      - name: 영등포 IMAX 감시 (1분 간격 상주)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ARGOS_PING: ${{ inputs.ping == true && '1' || '' }}
+          LOOP_MINUTES: ${{ inputs.minutes || '70' }}
         run: python3 monitor.py
 
-      - name: 상태 저장
+      - name: 기준선·오픈이력 저장
+        if: always()
         run: |
-          git add -A
+          git add state.json openings.log
           if [[ -n "$(git status --porcelain)" ]]; then
             git config user.name "argos-bot"
             git config user.email "actions@github.com"
-            git commit -m "state: 잔여석 기록 갱신"
-            git pull --rebase origin main
-            git push
+            git commit -m "state: 기준선/오픈이력 갱신"
+            for i in 1 2 3; do
+              git pull --rebase origin main && git push && break
+              sleep 5
+            done
           fi
