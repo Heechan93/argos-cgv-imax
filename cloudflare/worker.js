@@ -195,6 +195,8 @@ async function runWatch(env) {
   }
 
   const wide = now.getUTCMinutes() % 10 === 0;
+  // 생존 신호. KV 쓰기 한도(무료 1,000/일)를 감안해 10분에 한 번만 남긴다.
+  if (wide) await env.STATE.put("lastRun", stampOf(now));
   let { hits, horizon: h2, blocked } = await probe(horizon, wide ? PROBE_WIDE : PROBE_NARROW);
 
   if (blocked) {
@@ -285,7 +287,9 @@ async function buildReport(env) {
     out += "관측된 오픈 시각:\n";
     for (const e of events.slice(-4)) out += `· ${e}\n`;
   }
-  out += `\n⏱ 영등포는 1분 간격으로 감시 중입니다.`;
+  const lastRun = await env.STATE.get("lastRun");
+  out += `\n⏱ 영등포 1분 감시 작동 중`;
+  if (lastRun) out += ` (마지막 점검 ${lastRun.split(" ")[1]})`;
   return out;
 }
 
@@ -366,6 +370,7 @@ export default {
       if (action === "state") {
         return Response.json({
           horizon: await env.STATE.get("horizon"),
+          lastRun: await env.STATE.get("lastRun"),
           blockedUntil: await env.STATE.get("blockedUntil"),
           openings: JSON.parse((await env.STATE.get("openings")) || "[]"),
         });
