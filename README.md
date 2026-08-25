@@ -16,9 +16,18 @@ CGV **용산아이파크몰 / 영등포타임스퀘어 IMAX관**의 「오디세
 
 ## 구조
 
-- `monitor.py` — CGV 공개 상영시간표 API 조회 → 이전 상태(`state.json`)와 비교 → 텔레그램 전송
-- `.github/workflows/monitor.yml` — 5분 간격 자동 실행 (GitHub Actions, KST 07:00~01:00)
-- `state.json` — 직전 확인 시점의 회차별 잔여석 기록 (봇이 자동 갱신)
+**감시 본체 (현행)** — `cloudflare/worker.js`
+- **1분 간격**으로 영등포타임스퀘어 IMAX만 감시 (Cloudflare Workers cron)
+- 평소엔 1분에 CGV를 **1회**(아직 안 열린 다음 평일)만 조회하고, 10분마다 4일치를 훑는다.
+  CGV는 짧은 시간에 요청이 몰리면 "비정상적으로 CGV에 접속" 차단 페이지를 돌려주기 때문.
+- 차단 페이지를 받으면 10분간 쉬었다가 재개한다.
+- 오픈 이력은 Workers KV(`STATE`)에 분 단위로 기록된다.
+- 텔레그램 "현황" 응답도 이 Worker가 처리한다.
+
+**과거 방식 (수동 실행용으로만 유지)** — `monitor.py` + `.github/workflows/monitor.yml`
+- GitHub 예약 실행은 5분 크론을 걸어도 실제로는 최대 1시간까지 밀려서
+  오픈 시각을 분 단위로 잡을 수 없었다. 그래서 예약 실행은 껐다.
+- `state.json` / `openings.log` — 이 시절의 기록. 현황의 오픈 패턴에 계속 쓰인다.
 
 ## 설정 (GitHub Secrets)
 

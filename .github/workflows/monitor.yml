@@ -1,10 +1,9 @@
 name: ARGOS CGV IMAX monitor
 
+# 감시는 Cloudflare Worker(1분 간격, 영등포)로 이관했다.
+# GitHub의 예약 실행은 5분 크론을 걸어도 실제로는 ~1시간까지 밀려서
+# 오픈 시각을 분 단위로 잡을 수 없었다. 여기서는 수동 실행만 남긴다.
 on:
-  schedule:
-    # 5분 간격 (GitHub 최소 단위). 혼잡 시간엔 몇 분 지연될 수 있음.
-    # KST 07:00~다음날 01:00 (UTC 22:00~16:00)에만 실행해 불필요한 새벽 실행을 줄임.
-    - cron: "*/5 0-16,22-23 * * *"
   workflow_dispatch:
     inputs:
       ping:
