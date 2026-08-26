@@ -1,32 +1,24 @@
 name: 네이버 예매 접근 조사
-
-# 네이버 예매가 CGV 본 사이트보다 늦게 열리는지 확인하기 위한 조사.
-# 로컬 환경에서는 네이버 도메인이 전부 차단돼 있어 러너에서 확인한다.
 on:
   workflow_dispatch:
-
 jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: 네이버 예매 페이지 구조 파악
+      - name: 네이버 예매 최종 랜딩 확인
         run: |
-          UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-          curl -s --max-time 20 -A "$UA" "https://m.booking.naver.com/movie/" -o m.html -w "movie홈 http=%{http_code} size=%{size_download}\n"
-          echo "--- API 후보(스크립트 내 경로) ---"
-          grep -oE '"/[a-zA-Z0-9/_-]*(api|graphql|movie|schedule|timetable)[a-zA-Z0-9/_-]*"' m.html | sort -u | head -20
-          grep -oE 'https://[a-z.]*naver\.com/[a-zA-Z0-9/_-]*' m.html | sort -u | head -20
-
-      - name: 네이버 영화 API 직접 호출
-        run: |
-          UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
-          for u in \
-            "https://m.booking.naver.com/movie/api/v1/movies" \
-            "https://m.booking.naver.com/movie/api/movies" \
-            "https://api.booking.naver.com/movie/v1/movies" \
-            "https://m.booking.naver.com/graphql" ; do
-            echo "--- $u"
-            curl -s --max-time 15 -A "$UA" -H "Referer: https://m.booking.naver.com/movie/" "$u" -o r.txt -w "  http=%{http_code} size=%{size_download}\n"
-            head -c 200 r.txt; echo ""
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+          for u in "https://m.booking.naver.com/movie/" "https://booking.naver.com/movie/"; do
+            echo "=== $u"
+            curl -s -L --max-time 25 -A "$UA" \
+              -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+              -H "Accept-Language: ko-KR,ko;q=0.9,en;q=0.8" \
+              "$u" -o p.html -w "  최종URL=%{url_effective} http=%{http_code} size=%{size_download}\n"
+            echo "  --- 본문 키워드 ---"
+            for kw in 오디세이 IMAX 아이맥스 영등포 상영 예매 로그인; do
+              c=$(grep -o "$kw" p.html 2>/dev/null | wc -l); [ "$c" -gt 0 ] && echo "    $kw: ${c}회"
+            done
+            echo "  --- 내부 링크 ---"
+            grep -oE 'href="[^"]{5,80}"' p.html 2>/dev/null | sort -u | head -12
           done
